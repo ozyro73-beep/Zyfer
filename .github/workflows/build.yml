@@ -1,0 +1,49 @@
+name: Build Zyfer APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Create project and patch
+        run: |
+          flutter create --platforms=android --org com.zyfer app
+          rm -rf app/test
+          cp main.dart app/lib/main.dart
+          cp pubspec.yaml app/pubspec.yaml
+          mkdir -p app/android/app/src/main/kotlin/com/zyfer/app
+          cp android/app/src/main/kotlin/com/zyfer/app/*.kt app/android/app/src/main/kotlin/com/zyfer/app/
+          mkdir -p app/assets
+          cp -r assets/* app/assets/ 2>/dev/null || true
+          M=app/android/app/src/main/AndroidManifest.xml
+          sed -i '/<manifest/a <uses-permission android:name="android.permission.INTERNET"/><uses-permission android:name="android.permission.RECORD_AUDIO"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/><uses-permission android:name="android.permission.POST_NOTIFICATIONS"/><uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/><uses-permission android:name="com.android.alarm.permission.SET_ALARM"/>' $M
+          sed -i 's#</application>#<service android:name=".ZyferListeningService" android:exported="false" android:foregroundServiceType="microphone"/></application>#' $M
+          sed -i 's#<queries>#<queries><intent><action android:name="android.speech.RecognitionService"/></intent><intent><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent>#' $M
+          K=app/android/app/src/main/kotlin/com/zyfer/app
+          mkdir -p $K
+
+      - name: Build
+        working-directory: app
+        env:
+          GROQ_KEY: ${{ secrets.GROQ_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          ELEVENLABS_VOICE_ID: ${{ vars.ELEVENLABS_VOICE_ID }}
+        run: |
+          flutter pub get
+          flutter build apk --release \
+            --dart-define=GROQ_KEY="$GROQ_KEY" \
+            --dart-define=ELEVENLABS_API_KEY="$ELEVENLABS_API_KEY" \
+            --dart-define=ELEVENLABS_VOICE_ID="$ELEVENLABS_VOICE_ID"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Zyfer-APK
+          path: app/build/app/outputs/flutter-apk/app-release.apk
