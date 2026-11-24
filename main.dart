@@ -80,7 +80,7 @@ class _SetupS extends State<Setup> {
         Center(child: logo(80)), const SizedBox(height: 20),
         TextField(controller: name, style: white, decoration: deco('Your name')),
         const SizedBox(height: 14),
-        TextField(controller: key, style: white, obscureText: true, decoration: deco('Gemini API key')),
+        TextField(controller: key, style: white, obscureText: true, decoration: deco('API key')),
         const SizedBox(height: 18),
         const Text('Voice language', style: white),
         chips(['en-IN', 'hi-IN'], lang, (x) => lang = x),
@@ -131,12 +131,13 @@ class Home extends StatefulWidget {
 }
 
 class _HomeS extends State<Home> {
-  static const model = 'gemini-3.5-flash-lite';
+  static const model = 'llama-3.3-70b-versatile';
   static final wake = RegExp(r'(zyfer|zypher|zaifer|zaiphar|cipher|saifer|jaifer)');
   final stt = SpeechToText();
   final tts = FlutterTts();
   String status = 'Shuru ho raha hai...', heard = '', reply = '', err = '';
   bool on = true, busy = false, starting = false;
+  DateTime activeUntil = DateTime.fromMillisecondsSinceEpoch(0);
   String get title => prefs.getString('title') ?? 'Sir';
   String get lang => prefs.getString('lang') ?? 'en-IN';
   String get offlineMsg => 'Hi buddy $title, aapka internet off hai, main ye nahi kar sakta.';
@@ -173,6 +174,7 @@ class _HomeS extends State<Home> {
     final ok = await stt.initialize(
         onError: (e) {
           if (mounted) setState(() => err = 'Error: ${e.errorMsg}');
+          if (on && !busy) Future.delayed(const Duration(milliseconds: 1200), listenOnce);
         },
         onStatus: (s) {
           if ((s == 'done' || s == 'notListening') && on && !busy) {
@@ -197,7 +199,10 @@ class _HomeS extends State<Home> {
           pauseFor: const Duration(seconds: 3),
           onResult: (r) {
             if (mounted) setState(() => heard = r.recognizedWords);
-            if (r.finalResult && wake.hasMatch(r.recognizedWords.toLowerCase())) run(r.recognizedWords);
+            if (!r.finalResult) return;
+            final w = r.recognizedWords.toLowerCase();
+            final follow = DateTime.now().isBefore(activeUntil);
+            if (w.trim().isNotEmpty && (wake.hasMatch(w) || follow)) run(r.recognizedWords);
           });
     } finally {
       starting = false;
@@ -209,6 +214,8 @@ class _HomeS extends State<Home> {
     busy = true;
     await stt.stop();
     await handle(text);
+    activeUntil = DateTime.now().add(const Duration(seconds: 30));
+    await Future.delayed(const Duration(milliseconds: 800));
     busy = false;
     listenOnce();
   }
@@ -216,8 +223,7 @@ class _HomeS extends State<Home> {
   Future<void> handle(String raw) async {
     final low = raw.toLowerCase();
     final w = wake.firstMatch(low);
-    if (w == null) return;
-    final t = low.substring(w.end).replaceFirst(RegExp(r'^[,\s]+'), '').trim();
+    final t = (w == null ? low : low.substring(w.end)).replaceFirst(RegExp(r'^[,\s]+'), '').trim();
     if (t.isEmpty) return speak('Ji $title?');
     final m = RegExp(r'(madam|sir)\s*(bulao|bolo|bulana)|call me (madam|sir)').firstMatch(t);
     if (m != null) {
@@ -243,25 +249,29 @@ class _HomeS extends State<Home> {
   Future<String> ask(String q) async {
     try {
       final r = await http.post(
-          Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent'),
+          Uri.parse('https://api.groq.com/openai/v1/chat/completions'),
           headers: {
-            'x-goog-api-key': prefs.getString('key') ?? '',
+            'Authorization': 'Bearer ${prefs.getString('key') ?? ''}',
             'content-type': 'application/json'
           },
           body: jsonEncode({
-            'systemInstruction': {
-              'parts': [
-                {'text': 'You are Zyfer, a voice assistant. Address the user as $title (name: ${prefs.getString('name')}). '
-                    'Reply short, in the same language the user spoke, plain text only, no markdown.'}
-              ]
-            },
-            'contents': [
-              {'role': 'user', 'parts': [{'text': q}]}
+            'model': model,
+            'messages': [
+              {
+                'role': 'system',
+                'content': 'You are Zyfer, a voice assistant. Address the user as $title (name: ${prefs.getString('name')}). '
+                    'Reply short (1-3 sentences), in the same language the user spoke, plain text only, no markdown.'
+              },
+              {'role': 'user', 'content': q}
             ]
           }));
-      if (r.statusCode != 200) return 'API error ${r.statusCode}. $title, key ya model check karo.';
-      return jsonDecode(utf8.decode(r.bodyBytes))['candidates'][0]['content']['parts'][0]['text'];
+      if (r.statusCode != 200) {
+        if (mounted) setState(() => err = 'API ${r.statusCode}: ${utf8.decode(r.bodyBytes)}');
+        return 'API error ${r.statusCode}. $title, key check karo.';
+      }
+      return jsonDecode(utf8.decode(r.bodyBytes))['choices'][0]['message']['content'];
     } catch (e) {
+      if (mounted) setState(() => err = '$e');
       return 'Kuch gadbad ho gayi $title.';
     }
   }
