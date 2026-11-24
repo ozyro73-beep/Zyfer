@@ -70,7 +70,7 @@ class Setup extends StatefulWidget {
 
 class _SetupS extends State<Setup> {
   final name = TextEditingController(), key = TextEditingController();
-  String lang = 'hi-IN', title = 'Sir', voice = 'Male';
+  String lang = 'en-IN', title = 'Sir', voice = 'Male';
 
   Widget chips(List<String> o, String cur, void Function(String) on) => Wrap(spacing: 8, children: [
         for (final x in o) ChoiceChip(label: Text(x), selected: cur == x, onSelected: (_) => setState(() => on(x)))]);
@@ -80,10 +80,10 @@ class _SetupS extends State<Setup> {
         Center(child: logo(80)), const SizedBox(height: 20),
         TextField(controller: name, style: white, decoration: deco('Your name')),
         const SizedBox(height: 14),
-        TextField(controller: key, style: white, obscureText: true, decoration: deco('Claude API key')),
+        TextField(controller: key, style: white, obscureText: true, decoration: deco('Gemini API key')),
         const SizedBox(height: 18),
         const Text('Voice language', style: white),
-        chips(['hi-IN', 'en-IN'], lang, (x) => lang = x),
+        chips(['en-IN', 'hi-IN'], lang, (x) => lang = x),
         const SizedBox(height: 10),
         const Text('Voice type', style: white),
         chips(['Male', 'Female'], voice, (x) => voice = x),
@@ -131,17 +131,31 @@ class Home extends StatefulWidget {
 }
 
 class _HomeS extends State<Home> {
+  static const model = 'gemini-3.5-flash-lite';
+  static final wake = RegExp(r'(zyfer|zypher|zaifer|zaiphar|cipher|saifer|jaifer)');
   final stt = SpeechToText();
   final tts = FlutterTts();
-  String status = 'Mic dabao aur bolo', heard = '', reply = '';
+  String status = 'Shuru ho raha hai...', heard = '', reply = '', err = '';
+  bool on = true, busy = false, starting = false;
   String get title => prefs.getString('title') ?? 'Sir';
-  String get lang => prefs.getString('lang') ?? 'hi-IN';
+  String get lang => prefs.getString('lang') ?? 'en-IN';
   String get offlineMsg => 'Hi buddy $title, aapka internet off hai, main ye nahi kar sakta.';
 
   @override
   void initState() {
     super.initState();
-    Future.microtask(() => speak('Welcome $title to Zyfer'));
+    Future.microtask(() async {
+      await tts.awaitSpeakCompletion(true);
+      await speak('Welcome $title to Zyfer');
+      start();
+    });
+  }
+
+  @override
+  void dispose() {
+    stt.stop();
+    tts.stop();
+    super.dispose();
   }
 
   Future<void> speak(String s) async {
@@ -155,29 +169,56 @@ class _HomeS extends State<Home> {
   Future<bool> online() async =>
       !(await Connectivity().checkConnectivity()).contains(ConnectivityResult.none);
 
-  Future<void> listen() async {
-    await tts.stop();
-    if (!await stt.initialize()) {
-      setState(() => status = 'Mic permission ya speech service nahi mili');
-      return;
-    }
-    setState(() => status = 'Sun raha hu...');
-    await stt.listen(
-        localeId: lang.replaceAll('-', '_'),
-        listenFor: const Duration(seconds: 15),
-        pauseFor: const Duration(seconds: 3),
-        onResult: (r) {
-          setState(() => heard = r.recognizedWords);
-          if (r.finalResult) {
-            setState(() => status = 'Mic dabao aur bolo');
-            handle(r.recognizedWords);
+  Future<void> start() async {
+    final ok = await stt.initialize(
+        onError: (e) {
+          if (mounted) setState(() => err = 'Error: ${e.errorMsg}');
+        },
+        onStatus: (s) {
+          if ((s == 'done' || s == 'notListening') && on && !busy) {
+            Future.delayed(const Duration(milliseconds: 700), listenOnce);
           }
         });
+    if (!ok) {
+      if (mounted) setState(() => status = 'Speech service nahi mili. Google app / Speech services check karo');
+      return;
+    }
+    listenOnce();
+  }
+
+  Future<void> listenOnce() async {
+    if (!mounted || !on || busy || starting || stt.isListening) return;
+    starting = true;
+    try {
+      if (mounted) setState(() => status = 'Zyfer bolo... main sun raha hu');
+      await stt.listen(
+          localeId: lang.replaceAll('-', '_'),
+          listenFor: const Duration(seconds: 30),
+          pauseFor: const Duration(seconds: 3),
+          onResult: (r) {
+            if (mounted) setState(() => heard = r.recognizedWords);
+            if (r.finalResult && wake.hasMatch(r.recognizedWords.toLowerCase())) run(r.recognizedWords);
+          });
+    } finally {
+      starting = false;
+    }
+  }
+
+  Future<void> run(String text) async {
+    if (busy) return;
+    busy = true;
+    await stt.stop();
+    await handle(text);
+    busy = false;
+    listenOnce();
   }
 
   Future<void> handle(String raw) async {
-    final t = raw.toLowerCase().replaceFirst(RegExp(r'^\s*zyfer[,\s]*'), '').trim();
-    if (t.isEmpty) return;
+    final low = raw.toLowerCase();
+    final w = wake.firstMatch(low);
+    if (w == null) return;
+    final t = low.substring(w.end).replaceFirst(RegExp(r'^[,\s]+'), '').trim();
+    if (t.isEmpty) return speak('Ji $title?');
     final m = RegExp(r'(madam|sir)\s*(bulao|bolo|bulana)|call me (madam|sir)').firstMatch(t);
     if (m != null) {
       final v = (m.group(1) ?? m.group(3)) == 'madam' ? 'Madam' : 'Sir';
@@ -196,26 +237,30 @@ class _HomeS extends State<Home> {
       return speak('YouTube khol raha hu $title');
     }
     if (!await online()) return speak(offlineMsg);
-    speak(await ask(t));
+    return speak(await ask(t));
   }
 
   Future<String> ask(String q) async {
     try {
-      final r = await http.post(Uri.parse('https://api.anthropic.com/v1/messages'),
+      final r = await http.post(
+          Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent'),
           headers: {
-            'x-api-key': prefs.getString('key') ?? '',
-            'anthropic-version': '2023-06-01',
+            'x-goog-api-key': prefs.getString('key') ?? '',
             'content-type': 'application/json'
           },
           body: jsonEncode({
-            'model': 'claude-haiku-5-5',
-            'max_tokens': 300,
-            'system': 'You are Zyfer, a voice assistant. Address the user as $title (name: ${prefs.getString('name')}). '
-                'Reply short, in the same language the user spoke, plain text only, no markdown.',
-            'messages': [{'role': 'user', 'content': q}]
+            'systemInstruction': {
+              'parts': [
+                {'text': 'You are Zyfer, a voice assistant. Address the user as $title (name: ${prefs.getString('name')}). '
+                    'Reply short, in the same language the user spoke, plain text only, no markdown.'}
+              ]
+            },
+            'contents': [
+              {'role': 'user', 'parts': [{'text': q}]}
+            ]
           }));
-      if (r.statusCode != 200) return 'API error ${r.statusCode}. $title, API key check karo.';
-      return jsonDecode(utf8.decode(r.bodyBytes))['content'][0]['text'];
+      if (r.statusCode != 200) return 'API error ${r.statusCode}. $title, key ya model check karo.';
+      return jsonDecode(utf8.decode(r.bodyBytes))['candidates'][0]['content']['parts'][0]['text'];
     } catch (e) {
       return 'Kuch gadbad ho gayi $title.';
     }
@@ -235,10 +280,24 @@ class _HomeS extends State<Home> {
         const SizedBox(height: 8),
         Padding(padding: const EdgeInsets.symmetric(horizontal: 24),
             child: Text(reply, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 18))),
-        const Spacer(),
-        GestureDetector(onTap: listen, child: const CircleAvatar(radius: 40, backgroundColor: Colors.white,
-            child: Icon(Icons.mic, size: 40, color: bg))),
         const SizedBox(height: 8),
-        Text(status, style: const TextStyle(color: Colors.white70)),
+        Text(err, textAlign: TextAlign.center, style: const TextStyle(color: Colors.amber)),
+        const Spacer(),
+        GestureDetector(
+            onTap: () async {
+              if (on) {
+                on = false;
+                await stt.stop();
+                setState(() => status = 'Pause. Mic dabao dobara shuru karne ke liye');
+              } else {
+                setState(() => on = true);
+                listenOnce();
+              }
+            },
+            child: CircleAvatar(radius: 40, backgroundColor: Colors.white,
+                child: Icon(on ? Icons.mic : Icons.mic_off, size: 40, color: on ? bg : Colors.grey))),
+        const SizedBox(height: 8),
+        Padding(padding: const EdgeInsets.symmetric(horizontal: 24),
+            child: Text(status, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white70))),
         const SizedBox(height: 32)]));
 }
